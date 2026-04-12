@@ -10,15 +10,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-latest      # Apple Silicon (arm64)
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+          - arch: arm64
+            python-arch: arm64
+          - arch: x86_64
+            python-arch: x64
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          architecture: ${{ matrix.python-arch }}
+
+      - name: Verify architecture
+        run: python -c "import platform; print(platform.machine())"
 
       - name: Install dependencies
         run: |
