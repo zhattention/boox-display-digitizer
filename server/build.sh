@@ -1,10 +1,14 @@
 #!/bin/bash
-# Build boox-bridge server into a standalone macOS executable.
+# Build Boox Display Digitizer server into a macOS .app bundle + DMG.
 # Usage: cd server && ./build.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+
+APP_NAME="Boox Display Digitizer"
+BUNDLE_ID="com.boox.display-digitizer"
+ARCH="$(uname -m)"
 
 # Ensure venv
 if [ ! -d .venv ]; then
@@ -13,15 +17,30 @@ fi
 source .venv/bin/activate
 pip install -r requirements.txt pyinstaller
 
-# Build
+# Build .app bundle
 pyinstaller \
-    --name "boox-bridge-server" \
-    --onefile \
-    --console \
+    --name "$APP_NAME" \
+    --windowed \
+    --onedir \
     --noconfirm \
     --clean \
+    --osx-bundle-identifier "$BUNDLE_ID" \
     server.py
 
+# Create DMG with Applications symlink (drag-to-install)
+DMG_DIR="dmg-stage"
+rm -rf "$DMG_DIR"
+mkdir -p "$DMG_DIR"
+cp -R "dist/$APP_NAME.app" "$DMG_DIR/"
+ln -s /Applications "$DMG_DIR/Applications"
+
+DMG_NAME="BooxDisplayDigitizer-${ARCH}.dmg"
+hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$DMG_DIR" \
+    -ov -format UDZO \
+    "dist/$DMG_NAME"
+
 echo ""
-echo "Built: dist/boox-bridge-server"
-echo "Arch:  $(file dist/boox-bridge-server)"
+echo "Built: dist/$DMG_NAME"
+echo "Arch:  $ARCH"

@@ -22,36 +22,39 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies & build
+      - name: Install dependencies
         run: |
           cd server
-          python -m venv .venv
-          source .venv/bin/activate
           pip install -r requirements.txt pyinstaller
+
+      - name: Build .app bundle with PyInstaller
+        run: |
+          cd server
           pyinstaller \
-            --name "boox-bridge-server" \
-            --onefile \
-            --console \
+            --name "Boox Display Digitizer" \
+            --windowed \
+            --onedir \
             --noconfirm \
             --clean \
+            --osx-bundle-identifier "com.boox.display-digitizer" \
             server.py
 
       - name: Create DMG
         run: |
           cd server
           mkdir -p dmg-stage
-          cp dist/boox-bridge-server dmg-stage/
-          cp ../README.md dmg-stage/ 2>/dev/null || true
+          cp -R "dist/Boox Display Digitizer.app" dmg-stage/
+          ln -s /Applications dmg-stage/Applications
           hdiutil create \
-            -volname "Boox Bridge Server" \
+            -volname "Boox Display Digitizer" \
             -srcfolder dmg-stage \
             -ov -format UDZO \
-            "dist/boox-bridge-server-${{ matrix.arch }}.dmg"
+            "dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: server-${{ matrix.arch }}
-          path: server/dist/boox-bridge-server-${{ matrix.arch }}.dmg
+          path: server/dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg
 
   build-android:
     runs-on: ubuntu-latest
@@ -63,16 +66,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Build APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
+      - name: Rename APK
+        run: |
+          mv android/app/build/outputs/apk/debug/app-debug.apk \
+             android/app/build/outputs/apk/debug/BooxDisplayDigitizer.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/debug/BooxDisplayDigitizer.apk
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
