@@ -23,28 +23,18 @@ jobs:
           python-version: "3.11"
           architecture: ${{ matrix.python-arch }}
 
-      - name: Verify architecture
+      - name: Install dependencies & build
         run: |
-          python -c "import platform; print('Python arch:', platform.machine())"
-          file $(which python)
-
-      - name: Install dependencies
-        run: |
+          ARCH_PREFIX=""
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            ARCH_PREFIX="arch -x86_64"
+          fi
           cd server
-          pip install -r requirements.txt py2app
-
-      - name: Build .app bundle with py2app
-        run: |
-          cd server
-          python setup.py py2app
-
-      - name: Code sign (ad-hoc)
-        run: |
-          codesign --deep --force --sign - "server/dist/Boox Display Digitizer.app"
-
-      - name: Verify binary architecture
-        run: |
-          file "server/dist/Boox Display Digitizer.app/Contents/MacOS/Boox Display Digitizer"
+          $ARCH_PREFIX python -c "import platform; print('Python arch:', platform.machine())"
+          $ARCH_PREFIX pip install -r requirements.txt py2app
+          $ARCH_PREFIX python setup.py py2app
+          codesign --deep --force --sign - "dist/Boox Display Digitizer.app"
+          file "dist/Boox Display Digitizer.app/Contents/MacOS/Boox Display Digitizer"
 
       - name: Create DMG
         run: |
