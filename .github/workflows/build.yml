@@ -10,9 +10,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13      # Intel (x86_64)
-            arch: x86_64
-          - runner: macos-14      # Apple Silicon (arm64)
+          - runner: macos-latest      # Apple Silicon (arm64)
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
