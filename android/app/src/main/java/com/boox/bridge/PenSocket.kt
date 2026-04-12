@@ -10,6 +10,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
@@ -19,8 +20,8 @@ import java.util.concurrent.TimeUnit
  *
  * Wire format (matches server.py):
  *   1 byte  type    0=down 1=move 2=up 3=eraser_down 4=eraser_move 5=eraser_up
- *   4 bytes x       float32 big-endian, normalized 0.0..1.0
- *   4 bytes y       float32 big-endian, normalized 0.0..1.0
+ *   4 bytes x       float32 big-endian, normalized 0.0..1.0 of full Mac screen
+ *   4 bytes y       float32 big-endian, normalized 0.0..1.0 of full Mac screen
  */
 class PenSocket(private val listener: StateListener) {
 
@@ -28,9 +29,8 @@ class PenSocket(private val listener: StateListener) {
 
     interface StateListener {
         fun onStateChanged(state: State, message: String?)
-        // Called on a background (OkHttp) thread. Implementers should decode
-        // and hand off to the UI thread themselves.
         fun onScreenshot(jpegBytes: ByteArray)
+        fun onScreenInfo(width: Int, height: Int)
     }
 
     companion object {
@@ -49,12 +49,11 @@ class PenSocket(private val listener: StateListener) {
     private val client = OkHttpClient.Builder()
         .pingInterval(10, TimeUnit.SECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // no read timeout for long-lived socket
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     private var webSocket: WebSocket? = null
 
-    // Preallocated buffer to avoid GC churn on the hot path.
     private val scratch = ByteArray(PACKET_SIZE)
     private val scratchBuf: ByteBuffer = ByteBuffer.wrap(scratch).order(ByteOrder.BIG_ENDIAN)
 
@@ -73,6 +72,20 @@ class PenSocket(private val listener: StateListener) {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.i(TAG, "connected to $url")
                 notifyState(State.CONNECTED, null)
+            }
+
+            override fun onMessage(ws: WebSocket, text: String) {
+                try {
+                    val json = JSONObject(text)
+                    if (json.optString("type") == "screen_info") {
+                        val w = json.getInt("w")
+                        val h = json.getInt("h")
+                        Log.i(TAG, "screen_info: ${w}x${h}")
+                        mainHandler.post { listener.onScreenInfo(w, h) }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "bad text message: $text", e)
+                }
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
@@ -99,19 +112,11 @@ class PenSocket(private val listener: StateListener) {
         })
     }
 
-    /**
-     * Send a single-byte request asking the server to capture and send back
-     * a screenshot of the target rectangle. No-op if not connected.
-     */
     fun requestScreenshot() {
         val ws = webSocket ?: return
         ws.send(byteArrayOf(MSG_SCREENSHOT).toByteString(0, 1))
     }
 
-    /**
-     * Send one pen event. [normX] and [normY] must be normalized to [0, 1].
-     * Safe to call from any thread — OkHttp serializes writes internally.
-     */
     fun sendPen(type: Byte, normX: Float, normY: Float) {
         val ws = webSocket ?: return
         synchronized(scratch) {

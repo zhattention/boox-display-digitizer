@@ -4,15 +4,11 @@
     android:layout_height="match_parent"
     android:background="@android:color/white">
 
-    <!-- Full-screen drawing surface. Onyx TouchHelper attaches to this. -->
     <SurfaceView
         android:id="@+id/surfaceView"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Small top-left overlay for connection controls.
-         Its rect is registered as an "exclude rect" in TouchHelper so
-         pen strokes over this area don't accidentally trigger mouse events. -->
     <LinearLayout
         android:id="@+id/overlay"
         android:layout_width="wrap_content"
@@ -24,13 +20,13 @@
 
         <EditText
             android:id="@+id/serverUrlInput"
-            android:layout_width="320dp"
+            android:layout_width="280dp"
             android:layout_height="wrap_content"
             android:hint="@string/server_hint"
             android:imeOptions="actionDone"
             android:inputType="textUri"
             android:singleLine="true"
-            android:textSize="16sp" />
+            android:textSize="14sp" />
 
         <Button
             android:id="@+id/connectButton"
