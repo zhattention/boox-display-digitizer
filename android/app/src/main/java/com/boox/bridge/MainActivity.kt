@@ -136,10 +136,6 @@ class MainActivity : AppCompatActivity() {
                 true
             } else false
         }
-        binding.refreshButton.setOnClickListener {
-            penSocket.requestScreenshot()
-        }
-
         // Auto-discover server: NSD (mDNS) + UDP broadcast in parallel.
         startDiscovery()
 

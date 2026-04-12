@@ -106,8 +106,16 @@ class PenSocket(private val listener: StateListener) {
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "closed: $reason")
-                notifyState(State.DISCONNECTED, null)
+                Log.i(TAG, "closed: code=$code reason=$reason")
+                if (code == 1008) {
+                    notifyState(State.FAILED, "connection denied by server")
+                } else {
+                    notifyState(State.DISCONNECTED, null)
+                }
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                ws.close(code, reason)
             }
         })
     }

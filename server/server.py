@@ -1,12 +1,9 @@
 """
 boox-bridge Mac server.
 
-Listens for WebSocket connections from the Boox app and injects system
-mouse events so writing on the Boox moves the cursor inside ClassIn
-(or any other Mac app).
-
-Advertises itself via mDNS (Bonjour) so the Boox app can auto-discover
-the server on the local network.
+Runs as a macOS menu bar app. The WebSocket server, mDNS registration,
+and UDP broadcast all run in a background thread; rumps drives the UI
+on the main thread.
 """
 
 from __future__ import annotations
@@ -19,8 +16,10 @@ import os
 import socket
 import struct
 import sys
+import threading
 
 import mss
+import rumps
 import websockets
 from PIL import Image
 from Quartz import (
@@ -42,12 +41,6 @@ from Quartz import (
 from zeroconf import ServiceInfo
 from zeroconf.asyncio import AsyncZeroconf
 
-# ---------- UDP discovery --------------------------------------------------
-
-DISCOVERY_PORT = 9998
-DISCOVERY_MAGIC = b"BOOX-BRIDGE"
-DISCOVERY_INTERVAL = 2  # seconds
-
 # ---------- config ---------------------------------------------------------
 
 HOST = os.environ.get("BOOX_BRIDGE_HOST", "0.0.0.0")
@@ -58,14 +51,24 @@ ERASER_DOWN, ERASER_MOVE, ERASER_UP = 3, 4, 5
 
 MSG_SCREENSHOT = 0x10
 
-PACKET_STRUCT = struct.Struct("!Bff")  # type, x, y
-PACKET_SIZE = PACKET_STRUCT.size  # 9
+PACKET_STRUCT = struct.Struct("!Bff")
+PACKET_SIZE = PACKET_STRUCT.size
 
-SCREENSHOT_MAX_WIDTH = 1600
-SCREENSHOT_MAX_HEIGHT = 1200
-JPEG_QUALITY = 65
+SCREENSHOT_MAX_WIDTH = 2200
+SCREENSHOT_MAX_HEIGHT = 1650
+JPEG_QUALITY = 85
+
+DISCOVERY_PORT = 9998
+DISCOVERY_MAGIC = b"BOOX-BRIDGE"
+DISCOVERY_INTERVAL = 2
 
 SERVICE_TYPE = "_boox-bridge._tcp.local."
+
+# ---------- shared state ---------------------------------------------------
+
+screenshot_interval: float = float(os.environ.get("BOOX_BRIDGE_FPS_INTERVAL", "1"))
+connected_clients: int = 0
+server_loop: asyncio.AbstractEventLoop | None = None
 
 # ---------- screen info ----------------------------------------------------
 
@@ -87,7 +90,6 @@ log = logging.getLogger("boox-bridge")
 # ---------- mDNS / Bonjour ------------------------------------------------
 
 def _get_local_ip() -> str:
-    """Best-effort LAN IP address of this machine."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
@@ -96,7 +98,6 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
-
 
 def _make_service_info(port: int) -> ServiceInfo:
     ip = _get_local_ip()
@@ -110,7 +111,6 @@ def _make_service_info(port: int) -> ServiceInfo:
     )
 
 # ---------- core logic -----------------------------------------------------
-
 
 def _post(event_type: int, x: float, y: float, button: int) -> None:
     ev = CGEventCreateMouseEvent(None, event_type, (x, y), button)
@@ -131,7 +131,6 @@ class MouseInjector:
 
     def handle(self, packet_type: int, bx: float, by: float) -> None:
         x, y = self.map_point(bx, by)
-
         if packet_type == PEN_DOWN:
             _post(kCGEventMouseMoved, x, y, kCGMouseButtonLeft)
             _post(kCGEventLeftMouseDown, x, y, kCGMouseButtonLeft)
@@ -156,8 +155,6 @@ class MouseInjector:
         elif packet_type == ERASER_UP:
             _post(kCGEventRightMouseUp, x, y, kCGMouseButtonRight)
             self.eraser_down = False
-        else:
-            log.warning("unknown packet type: %d", packet_type)
 
     def release_all(self) -> None:
         if self.button_down:
@@ -180,44 +177,76 @@ def grab_screenshot_jpeg() -> bytes:
     return buf.getvalue()
 
 
+async def auto_screenshot(ws: websockets.WebSocketServerProtocol) -> None:
+    while True:
+        await asyncio.sleep(screenshot_interval)
+        try:
+            jpeg = await asyncio.to_thread(grab_screenshot_jpeg)
+            await ws.send(bytes([MSG_SCREENSHOT]) + jpeg)
+        except websockets.ConnectionClosed:
+            break
+        except Exception as e:
+            log.warning("auto screenshot error: %s", e)
+
+
 async def handle_client(ws: websockets.WebSocketServerProtocol) -> None:
+    global connected_clients
     peer = ws.remote_address
     log.info("client connected: %s", peer)
+    connected_clients += 1
     injector = MouseInjector(SCREEN_W, SCREEN_H)
+
+    # Ask user to allow or deny the connection.
+    import subprocess
+    result = await asyncio.to_thread(
+        subprocess.run,
+        [
+            "osascript", "-e",
+            'display dialog "A Boox device is requesting to connect.'
+            f'\\n\\nIP Address:  {peer[0]}'
+            f'\\nPort:  {peer[1]}'
+            '\\n\\nAllow this device to control your mouse and view your screen?" '
+            'with title "Boox Bridge — New Connection" '
+            'buttons {"Deny", "Allow"} default button "Allow" '
+            'with icon caution '
+            'giving up after 30',
+        ],
+        capture_output=True, text=True,
+    )
+    if "Deny" in result.stdout or result.returncode != 0:
+        log.info("connection denied by user: %s", peer)
+        await ws.close(1008, "denied")
+        return
+
+    log.info("connection allowed: %s", peer)
 
     screen_info = json.dumps({"type": "screen_info", "w": SCREEN_W, "h": SCREEN_H})
     await ws.send(screen_info)
-    log.info("sent screen_info: %dx%d points", SCREEN_W, SCREEN_H)
+
+    push_task = asyncio.create_task(auto_screenshot(ws))
 
     n_packets = 0
     try:
         async for message in ws:
             if isinstance(message, str):
-                log.debug("text message: %s", message)
                 continue
             if len(message) == PACKET_SIZE:
                 packet_type, bx, by = PACKET_STRUCT.unpack(message)
                 injector.handle(packet_type, bx, by)
                 n_packets += 1
-                if n_packets % 1000 == 0:
-                    log.info("%d packets processed", n_packets)
             elif len(message) == 1 and message[0] == MSG_SCREENSHOT:
-                log.info("screenshot requested by %s", peer)
                 jpeg = await asyncio.to_thread(grab_screenshot_jpeg)
                 await ws.send(bytes([MSG_SCREENSHOT]) + jpeg)
-                log.info("screenshot sent: %d bytes", len(jpeg))
-            else:
-                log.warning("bad packet length: %d", len(message))
     except websockets.ConnectionClosed:
         pass
     finally:
+        push_task.cancel()
         injector.release_all()
+        connected_clients -= 1
         log.info("client disconnected: %s  (%d packets)", peer, n_packets)
 
 
 async def udp_broadcast(ws_port: int) -> None:
-    """Periodically broadcast server presence on UDP so the Boox app can
-    auto-discover without manual IP entry."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     payload = DISCOVERY_MAGIC + struct.pack("!H", ws_port)
@@ -233,31 +262,96 @@ async def udp_broadcast(ws_port: int) -> None:
         sock.close()
 
 
-async def main() -> None:
+async def server_main() -> None:
+    global server_loop
+    server_loop = asyncio.get_event_loop()
+
     log.info("boox-bridge server starting on ws://%s:%d", HOST, PORT)
     log.info("screen: %dx%d points", SCREEN_W, SCREEN_H)
 
-    # mDNS (Bonjour)
     svc = _make_service_info(PORT)
     azc = AsyncZeroconf()
     await azc.async_register_service(svc)
-    log.info("mDNS registered: %s @ %s:%d", svc.name, _get_local_ip(), PORT)
+    log.info("mDNS registered @ %s:%d", _get_local_ip(), PORT)
 
-    # UDP broadcast discovery (fallback for devices where NSD doesn't work)
     udp_task = asyncio.create_task(udp_broadcast(PORT))
 
     try:
         async with websockets.serve(handle_client, HOST, PORT, max_size=2 ** 20):
-            log.info("listening... Ctrl-C to stop")
+            log.info("listening... ws://%s:%d", _get_local_ip(), PORT)
             await asyncio.Future()
     finally:
         udp_task.cancel()
         await azc.async_unregister_service(svc)
         await azc.async_close()
 
-if __name__ == "__main__":
+
+def _run_server_thread() -> None:
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        log.info("stopped")
-        sys.exit(0)
+        asyncio.run(server_main())
+    except Exception as e:
+        log.error("server thread crashed: %s", e)
+
+# ---------- macOS menu bar app ---------------------------------------------
+
+INTERVAL_OPTIONS = [0.5, 1, 2, 3, 5]
+
+class BooxBridgeApp(rumps.App):
+    def __init__(self):
+        ip = _get_local_ip()
+        super().__init__(
+            name="Boox Bridge",
+            title="\u270F\uFE0F",  # pencil emoji
+            quit_button=None,
+        )
+
+        self.status_item = rumps.MenuItem(f"ws://{ip}:{PORT}", callback=None)
+        self.status_item.set_callback(None)
+        self.clients_item = rumps.MenuItem("Clients: 0", callback=None)
+        self.clients_item.set_callback(None)
+
+        self.interval_menu = rumps.MenuItem("Screenshot Interval")
+        for val in INTERVAL_OPTIONS:
+            label = f"{val}s"
+            item = rumps.MenuItem(label, callback=self._set_interval)
+            item._interval_value = val
+            if val == screenshot_interval:
+                item.state = True
+            self.interval_menu.add(item)
+
+        self.menu = [
+            self.status_item,
+            self.clients_item,
+            None,  # separator
+            self.interval_menu,
+            None,
+            rumps.MenuItem("Quit", callback=self._quit),
+        ]
+
+        # Start server in background thread.
+        self._server_thread = threading.Thread(target=_run_server_thread, daemon=True)
+        self._server_thread.start()
+
+        # Periodic UI update.
+        self._timer = rumps.Timer(self._update_ui, 2)
+        self._timer.start()
+
+    def _update_ui(self, _sender) -> None:
+        self.clients_item.title = f"Clients: {connected_clients}"
+
+    def _set_interval(self, sender) -> None:
+        global screenshot_interval
+        screenshot_interval = sender._interval_value
+        for item in self.interval_menu.values():
+            if hasattr(item, '_interval_value'):
+                item.state = (item._interval_value == screenshot_interval)
+        log.info("screenshot interval changed to %ss", screenshot_interval)
+
+    def _quit(self, _sender) -> None:
+        if server_loop:
+            server_loop.call_soon_threadsafe(server_loop.stop)
+        rumps.quit_application()
+
+
+if __name__ == "__main__":
+    BooxBridgeApp().run()

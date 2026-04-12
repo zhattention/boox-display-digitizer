@@ -35,13 +35,6 @@
             android:layout_marginStart="8dp"
             android:text="@string/connect" />
 
-        <Button
-            android:id="@+id/refreshButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="@string/refresh" />
-
         <TextView
             android:id="@+id/statusText"
             android:layout_width="wrap_content"
