@@ -6,15 +6,22 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.SurfaceHolder
 import android.view.View
-import android.provider.Settings
 import android.view.inputmethod.EditorInfo
 import androidx.appcompat.app.AppCompatActivity
 import com.boox.bridge.databinding.ActivityMainBinding
@@ -31,6 +38,9 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SERVER_URL = "server_url"
         private const val MIN_ZOOM = 0.5f
         private const val MAX_ZOOM = 5.0f
+        private const val DISCOVERY_PORT = 9998
+        private val DISCOVERY_MAGIC = "BOOX-BRIDGE".toByteArray()
+        private const val NSD_SERVICE_TYPE = "_boox-bridge._tcp."
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -54,11 +64,18 @@ class MainActivity : AppCompatActivity() {
 
     private var lastScreenshot: Bitmap? = null
 
-    // Gesture state: ScaleGestureDetector for pinch, manual 2-finger pan tracking.
     private lateinit var scaleDetector: ScaleGestureDetector
     private var twoFingerDragging: Boolean = false
     private var lastMidX: Float = 0f
     private var lastMidY: Float = 0f
+
+    // Discovery: NSD (mDNS) + UDP broadcast fallback, first one wins
+    private var nsdManager: NsdManager? = null
+    private var nsdActive: Boolean = false
+    private var multicastLock: WifiManager.MulticastLock? = null
+    @Volatile private var udpDiscoveryRunning: Boolean = false
+    private var udpDiscoveryThread: Thread? = null
+    @Volatile private var serverDiscovered: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,6 +139,9 @@ class MainActivity : AppCompatActivity() {
         binding.refreshButton.setOnClickListener {
             penSocket.requestScreenshot()
         }
+
+        // Auto-discover server: NSD (mDNS) + UDP broadcast in parallel.
+        startDiscovery()
 
         binding.surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {}
@@ -362,6 +382,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopDiscovery()
         touchHelper?.closeRawDrawing()
         touchHelper = null
         penSocket.close()
@@ -375,5 +396,102 @@ class MainActivity : AppCompatActivity() {
         } catch (e: SecurityException) {
             Log.w(TAG, "Cannot set hidden_api_policy (grant via: adb shell pm grant com.boox.bridge android.permission.WRITE_SECURE_SETTINGS)")
         }
+    }
+
+    // ---- Server discovery (NSD + UDP broadcast) ----------------------------
+
+    private fun onServerFound(host: String, port: Int, source: String) {
+        if (serverDiscovered) return
+        serverDiscovered = true
+        val url = "ws://$host:$port"
+        Log.i(TAG, "Server found via $source: $url")
+        mainHandler.post {
+            binding.serverUrlInput.setText(url)
+            binding.statusText.text = "found: $host"
+        }
+    }
+
+    private fun startDiscovery() {
+        // 1) NSD (mDNS / Bonjour)
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        multicastLock = wifi.createMulticastLock("boox-bridge").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        nsdManager = (getSystemService(Context.NSD_SERVICE) as NsdManager).also {
+            it.discoverServices(NSD_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, nsdDiscoveryListener)
+            nsdActive = true
+        }
+
+        // 2) UDP broadcast fallback
+        udpDiscoveryRunning = true
+        udpDiscoveryThread = Thread({
+            try {
+                val sock = DatagramSocket(DISCOVERY_PORT)
+                sock.broadcast = true
+                sock.soTimeout = 5000
+                val buf = ByteArray(64)
+                val pkt = DatagramPacket(buf, buf.size)
+                Log.i(TAG, "UDP discovery listening on port $DISCOVERY_PORT")
+                while (udpDiscoveryRunning && !serverDiscovered) {
+                    try {
+                        sock.receive(pkt)
+                        val magic = DISCOVERY_MAGIC
+                        if (pkt.length >= magic.size + 2) {
+                            val data = pkt.data
+                            val match = (0 until magic.size).all { data[pkt.offset + it] == magic[it] }
+                            if (match) {
+                                val portBuf = ByteBuffer.wrap(data, pkt.offset + magic.size, 2)
+                                    .order(ByteOrder.BIG_ENDIAN)
+                                val wsPort = portBuf.short.toInt() and 0xFFFF
+                                val host = pkt.address.hostAddress ?: continue
+                                onServerFound(host, wsPort, "UDP")
+                            }
+                        }
+                    } catch (_: java.net.SocketTimeoutException) {
+                        // retry
+                    }
+                }
+                sock.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "UDP discovery error: ${e.message}")
+            }
+        }, "udp-discovery").also { it.isDaemon = true; it.start() }
+    }
+
+    private val nsdDiscoveryListener = object : NsdManager.DiscoveryListener {
+        override fun onDiscoveryStarted(serviceType: String) {
+            Log.i(TAG, "NSD discovery started")
+        }
+        override fun onServiceFound(info: NsdServiceInfo) {
+            Log.i(TAG, "NSD service found: ${info.serviceName}")
+            nsdManager?.resolveService(info, nsdResolveListener)
+        }
+        override fun onServiceLost(info: NsdServiceInfo) {}
+        override fun onDiscoveryStopped(serviceType: String) { nsdActive = false }
+        override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+            Log.w(TAG, "NSD start failed: $errorCode")
+            nsdActive = false
+        }
+        override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+    }
+
+    private val nsdResolveListener = object : NsdManager.ResolveListener {
+        override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+            Log.w(TAG, "NSD resolve failed: $errorCode")
+        }
+        override fun onServiceResolved(info: NsdServiceInfo) {
+            val host = info.host?.hostAddress ?: return
+            onServerFound(host, info.port, "NSD")
+        }
+    }
+
+    private fun stopDiscovery() {
+        udpDiscoveryRunning = false
+        udpDiscoveryThread?.interrupt()
+        if (nsdActive) {
+            try { nsdManager?.stopServiceDiscovery(nsdDiscoveryListener) } catch (_: Exception) {}
+        }
+        multicastLock?.let { if (it.isHeld) it.release() }
     }
 }

@@ -16,6 +16,11 @@ android/app/*.iml
 *.apk
 *.aab
 
+# PyInstaller
+server/build/
+server/dist/
+server/*.spec
+
 # macOS
 .DS_Store
 

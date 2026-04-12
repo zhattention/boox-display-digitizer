@@ -1,0 +1,95 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-server:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13      # Intel (x86_64)
+            arch: x86_64
+          - runner: macos-14      # Apple Silicon (arm64)
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies & build
+        run: |
+          cd server
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt pyinstaller
+          pyinstaller \
+            --name "boox-bridge-server" \
+            --onefile \
+            --console \
+            --noconfirm \
+            --clean \
+            server.py
+
+      - name: Create DMG
+        run: |
+          cd server
+          mkdir -p dmg-stage
+          cp dist/boox-bridge-server dmg-stage/
+          cp ../README.md dmg-stage/ 2>/dev/null || true
+          hdiutil create \
+            -volname "Boox Bridge Server" \
+            -srcfolder dmg-stage \
+            -ov -format UDZO \
+            "dist/boox-bridge-server-${{ matrix.arch }}.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: server/dist/boox-bridge-server-${{ matrix.arch }}.dmg
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-server, build-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/server-x86_64/*.dmg
+            artifacts/server-arm64/*.dmg
+            artifacts/android-apk/*.apk
+          generate_release_notes: true

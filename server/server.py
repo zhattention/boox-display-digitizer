@@ -5,23 +5,8 @@ Listens for WebSocket connections from the Boox app and injects system
 mouse events so writing on the Boox moves the cursor inside ClassIn
 (or any other Mac app).
 
-Wire format (upstream, Boox -> Mac):
-    1 byte  type    0=down  1=move  2=up  3=eraser_down  4=eraser_move  5=eraser_up
-    4 bytes x       float big-endian, normalized 0.0..1.0 of full Mac screen
-    4 bytes y       float big-endian, normalized 0.0..1.0 of full Mac screen
-    total 9 bytes
-
-Coordinate system:
-    Boox sends normalized (0,0)=top-left -> (1,1)=bottom-right of the
-    full Mac screen. The Boox app handles viewport (pan/zoom) mapping
-    locally before sending.
-
-Run:
-    python3 -m venv .venv && source .venv/bin/activate
-    pip install -r requirements.txt
-    python server.py
-First run will prompt for Accessibility permission -- grant it to your
-terminal (or Python) in System Settings -> Privacy & Security -> Accessibility.
+Advertises itself via mDNS (Bonjour) so the Boox app can auto-discover
+the server on the local network.
 """
 
 from __future__ import annotations
@@ -31,6 +16,7 @@ import io
 import json
 import logging
 import os
+import socket
 import struct
 import sys
 
@@ -53,13 +39,20 @@ from Quartz import (
     kCGMouseButtonLeft,
     kCGMouseButtonRight,
 )
+from zeroconf import ServiceInfo
+from zeroconf.asyncio import AsyncZeroconf
+
+# ---------- UDP discovery --------------------------------------------------
+
+DISCOVERY_PORT = 9998
+DISCOVERY_MAGIC = b"BOOX-BRIDGE"
+DISCOVERY_INTERVAL = 2  # seconds
 
 # ---------- config ---------------------------------------------------------
 
 HOST = os.environ.get("BOOX_BRIDGE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("BOOX_BRIDGE_PORT", "9999"))
 
-# Packet type constants (must match Android side)
 PEN_DOWN, PEN_MOVE, PEN_UP = 0, 1, 2
 ERASER_DOWN, ERASER_MOVE, ERASER_UP = 3, 4, 5
 
@@ -68,15 +61,15 @@ MSG_SCREENSHOT = 0x10
 PACKET_STRUCT = struct.Struct("!Bff")  # type, x, y
 PACKET_SIZE = PACKET_STRUCT.size  # 9
 
-# Screenshot: downscale full screen capture to keep frames reasonable.
 SCREENSHOT_MAX_WIDTH = 1600
 SCREENSHOT_MAX_HEIGHT = 1200
 JPEG_QUALITY = 65
 
+SERVICE_TYPE = "_boox-bridge._tcp.local."
+
 # ---------- screen info ----------------------------------------------------
 
 def _get_screen_size() -> tuple[int, int]:
-    """Return (width, height) of the main display in points (not pixels)."""
     bounds = CGDisplayBounds(CGMainDisplayID())
     return int(bounds.size.width), int(bounds.size.height)
 
@@ -91,6 +84,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("boox-bridge")
 
+# ---------- mDNS / Bonjour ------------------------------------------------
+
+def _get_local_ip() -> str:
+    """Best-effort LAN IP address of this machine."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def _make_service_info(port: int) -> ServiceInfo:
+    ip = _get_local_ip()
+    hostname = socket.gethostname()
+    return ServiceInfo(
+        SERVICE_TYPE,
+        f"Boox Bridge ({hostname}).{SERVICE_TYPE}",
+        addresses=[socket.inet_aton(ip)],
+        port=port,
+        properties={"version": "1"},
+    )
+
 # ---------- core logic -----------------------------------------------------
 
 
@@ -100,9 +118,6 @@ def _post(event_type: int, x: float, y: float, button: int) -> None:
 
 
 class MouseInjector:
-    """Maps normalized Boox coordinates to Mac screen points and injects
-    system mouse events."""
-
     def __init__(self, screen_w: int, screen_h: int) -> None:
         self.sw = screen_w
         self.sh = screen_h
@@ -118,8 +133,6 @@ class MouseInjector:
         x, y = self.map_point(bx, by)
 
         if packet_type == PEN_DOWN:
-            # Move cursor to position first — some apps ignore MouseDown
-            # if the cursor wasn't already at the target location.
             _post(kCGEventMouseMoved, x, y, kCGMouseButtonLeft)
             _post(kCGEventLeftMouseDown, x, y, kCGMouseButtonLeft)
             self.button_down = True
@@ -156,10 +169,8 @@ class MouseInjector:
 
 
 def grab_screenshot_jpeg() -> bytes:
-    """Capture the full primary monitor, convert to grayscale, downscale,
-    JPEG-encode. Returns raw JPEG bytes."""
     with mss.mss() as sct:
-        monitor = sct.monitors[1]  # primary monitor
+        monitor = sct.monitors[1]
         shot = sct.grab(monitor)
     img = Image.frombytes("RGB", shot.size, shot.rgb)
     img = img.convert("L")
@@ -174,7 +185,6 @@ async def handle_client(ws: websockets.WebSocketServerProtocol) -> None:
     log.info("client connected: %s", peer)
     injector = MouseInjector(SCREEN_W, SCREEN_H)
 
-    # Send screen dimensions so the Boox can set up coordinate mapping.
     screen_info = json.dumps({"type": "screen_info", "w": SCREEN_W, "h": SCREEN_H})
     await ws.send(screen_info)
     log.info("sent screen_info: %dx%d points", SCREEN_W, SCREEN_H)
@@ -205,13 +215,45 @@ async def handle_client(ws: websockets.WebSocketServerProtocol) -> None:
         log.info("client disconnected: %s  (%d packets)", peer, n_packets)
 
 
+async def udp_broadcast(ws_port: int) -> None:
+    """Periodically broadcast server presence on UDP so the Boox app can
+    auto-discover without manual IP entry."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    payload = DISCOVERY_MAGIC + struct.pack("!H", ws_port)
+    log.info("UDP discovery broadcasting on port %d", DISCOVERY_PORT)
+    try:
+        while True:
+            try:
+                sock.sendto(payload, ("255.255.255.255", DISCOVERY_PORT))
+            except OSError:
+                pass
+            await asyncio.sleep(DISCOVERY_INTERVAL)
+    finally:
+        sock.close()
+
+
 async def main() -> None:
     log.info("boox-bridge server starting on ws://%s:%d", HOST, PORT)
     log.info("screen: %dx%d points", SCREEN_W, SCREEN_H)
 
-    async with websockets.serve(handle_client, HOST, PORT, max_size=2 ** 20):
-        log.info("listening... Ctrl-C to stop")
-        await asyncio.Future()
+    # mDNS (Bonjour)
+    svc = _make_service_info(PORT)
+    azc = AsyncZeroconf()
+    await azc.async_register_service(svc)
+    log.info("mDNS registered: %s @ %s:%d", svc.name, _get_local_ip(), PORT)
+
+    # UDP broadcast discovery (fallback for devices where NSD doesn't work)
+    udp_task = asyncio.create_task(udp_broadcast(PORT))
+
+    try:
+        async with websockets.serve(handle_client, HOST, PORT, max_size=2 ** 20):
+            log.info("listening... Ctrl-C to stop")
+            await asyncio.Future()
+    finally:
+        udp_task.cancel()
+        await azc.async_unregister_service(svc)
+        await azc.async_close()
 
 if __name__ == "__main__":
     try:
