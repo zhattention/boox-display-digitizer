@@ -7,13 +7,6 @@ on:
 
 jobs:
   build-server:
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            python-arch: arm64
-          - arch: x86_64
-            python-arch: x64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,17 +14,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          architecture: ${{ matrix.python-arch }}
-
-      - name: Verify architecture
-        run: python -c "import platform; print(platform.machine())"
 
       - name: Install dependencies
         run: |
           cd server
           pip install -r requirements.txt pyinstaller
 
-      - name: Build .app bundle with PyInstaller
+      - name: Build .app bundle
         run: |
           cd server
           pyinstaller \
@@ -41,7 +30,12 @@ jobs:
             --noconfirm \
             --clean \
             --osx-bundle-identifier "com.boox.display-digitizer" \
+            --target-architecture universal2 \
             server.py
+
+      - name: Verify binary architecture
+        run: |
+          file "server/dist/Boox Display Digitizer.app/Contents/MacOS/Boox Display Digitizer"
 
       - name: Create DMG
         run: |
@@ -53,12 +47,12 @@ jobs:
             -volname "Boox Display Digitizer" \
             -srcfolder dmg-stage \
             -ov -format UDZO \
-            "dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg"
+            "dist/BooxDisplayDigitizer.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: server-${{ matrix.arch }}
-          path: server/dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg
+          name: server-dmg
+          path: server/dist/BooxDisplayDigitizer.dmg
 
   build-android:
     runs-on: ubuntu-latest
@@ -104,7 +98,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/server-x86_64/*.dmg
-            artifacts/server-arm64/*.dmg
+            artifacts/server-dmg/*.dmg
             artifacts/android-apk/*.apk
           generate_release_notes: true
