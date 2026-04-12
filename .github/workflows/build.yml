@@ -35,6 +35,8 @@ jobs:
           mkdir -p dmg-stage
           cp -R "dist/Boox Display Digitizer.app" dmg-stage/
           ln -s /Applications dmg-stage/Applications
+          sync
+          sleep 1
           hdiutil create \
             -volname "Boox Display Digitizer" \
             -srcfolder dmg-stage \
