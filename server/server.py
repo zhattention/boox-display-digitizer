@@ -213,7 +213,8 @@ async def handle_client(ws: websockets.WebSocketServerProtocol) -> None:
         ],
         capture_output=True, text=True,
     )
-    if "Deny" in result.stdout or result.returncode != 0:
+    gave_up = "gave up:true" in result.stdout.replace(" ", "")
+    if "Deny" in result.stdout or gave_up or result.returncode != 0:
         log.info("connection denied by user: %s", peer)
         await ws.close(1008, "denied")
         return

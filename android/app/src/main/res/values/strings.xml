@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Boox Bridge</string>
+    <string name="app_name">Boox Display Digitizer</string>
+    <string name="product_title">Boox Display Digitizer v0.1.0</string>
     <string name="server_hint">ws://192.168.1.x:9999</string>
     <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>
-    <string name="refresh">刷新</string>
     <string name="status_disconnected">disconnected</string>
     <string name="status_connecting">connecting…</string>
+    <string name="status_waiting_approval">waiting — please tap Allow on your Mac</string>
     <string name="status_connected">connected</string>
     <string name="status_failed">connection failed</string>
 </resources>

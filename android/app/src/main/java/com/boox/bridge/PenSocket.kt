@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
  */
 class PenSocket(private val listener: StateListener) {
 
-    enum class State { DISCONNECTED, CONNECTING, CONNECTED, FAILED }
+    enum class State { DISCONNECTED, CONNECTING, WAITING_APPROVAL, CONNECTED, FAILED }
 
     interface StateListener {
         fun onStateChanged(state: State, message: String?)
@@ -70,8 +70,8 @@ class PenSocket(private val listener: StateListener) {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                Log.i(TAG, "connected to $url")
-                notifyState(State.CONNECTED, null)
+                Log.i(TAG, "connected to $url, waiting for approval")
+                notifyState(State.WAITING_APPROVAL, null)
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
@@ -80,7 +80,8 @@ class PenSocket(private val listener: StateListener) {
                     if (json.optString("type") == "screen_info") {
                         val w = json.getInt("w")
                         val h = json.getInt("h")
-                        Log.i(TAG, "screen_info: ${w}x${h}")
+                        Log.i(TAG, "screen_info: ${w}x${h} — approved")
+                        notifyState(State.CONNECTED, null)
                         mainHandler.post { listener.onScreenInfo(w, h) }
                     }
                 } catch (e: Exception) {

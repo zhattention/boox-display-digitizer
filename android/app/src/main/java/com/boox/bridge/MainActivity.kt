@@ -119,6 +119,7 @@ class MainActivity : AppCompatActivity() {
                 macH = height.toFloat()
                 Log.i(TAG, "Mac screen: ${width}x${height} points")
                 recalcViewport()
+                updateInfoText()
             }
         })
 
@@ -136,6 +137,13 @@ class MainActivity : AppCompatActivity() {
                 true
             } else false
         }
+
+        // Tap collapsed row to toggle expand/collapse.
+        binding.collapsedRow.setOnClickListener { toggleOverlay() }
+
+        // Start expanded (show connect controls).
+        binding.expandedSection.visibility = View.VISIBLE
+
         // Auto-discover server: NSD (mDNS) + UDP broadcast in parallel.
         startDiscovery()
 
@@ -355,16 +363,61 @@ class MainActivity : AppCompatActivity() {
         penSocket.sendPen(type, nx, ny)
     }
 
+    private var overlayExpanded: Boolean = true
+
+    private fun toggleOverlay() {
+        overlayExpanded = !overlayExpanded
+        binding.expandedSection.visibility = if (overlayExpanded) View.VISIBLE else View.GONE
+    }
+
+    private fun collapseOverlay() {
+        overlayExpanded = false
+        binding.expandedSection.visibility = View.GONE
+    }
+
     private fun updateStatusUi(state: PenSocket.State, message: String?) {
-        val text = when (state) {
-            PenSocket.State.DISCONNECTED -> getString(R.string.status_disconnected)
-            PenSocket.State.CONNECTING -> getString(R.string.status_connecting)
-            PenSocket.State.CONNECTED -> getString(R.string.status_connected)
-            PenSocket.State.FAILED ->
-                message?.let { "${getString(R.string.status_failed)}: $it" }
+        val dotRes: Int
+        val statusStr: String
+
+        when (state) {
+            PenSocket.State.DISCONNECTED -> {
+                dotRes = R.drawable.dot_gray
+                statusStr = getString(R.string.status_disconnected)
+                binding.infoText.visibility = View.GONE
+            }
+            PenSocket.State.CONNECTING -> {
+                dotRes = R.drawable.dot_gray
+                statusStr = getString(R.string.status_connecting)
+                binding.infoText.visibility = View.GONE
+            }
+            PenSocket.State.WAITING_APPROVAL -> {
+                dotRes = R.drawable.dot_yellow
+                statusStr = getString(R.string.status_waiting_approval)
+                binding.infoText.visibility = View.GONE
+            }
+            PenSocket.State.CONNECTED -> {
+                dotRes = R.drawable.dot_green
+                statusStr = getString(R.string.status_connected)
+                updateInfoText()
+                collapseOverlay()
+            }
+            PenSocket.State.FAILED -> {
+                dotRes = R.drawable.dot_red
+                statusStr = message?.let { "${getString(R.string.status_failed)}: $it" }
                     ?: getString(R.string.status_failed)
+                binding.infoText.visibility = View.GONE
+            }
         }
-        binding.statusText.text = text
+
+        binding.statusDot.setBackgroundResource(dotRes)
+        binding.statusText.text = statusStr
+    }
+
+    private fun updateInfoText() {
+        if (macW > 0 && macH > 0) {
+            binding.infoText.text = "${macW.toInt()}×${macH.toInt()}"
+            binding.infoText.visibility = View.VISIBLE
+        }
     }
 
     override fun onResume() {
