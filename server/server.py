@@ -22,6 +22,18 @@ import mss
 import rumps
 import websockets
 from PIL import Image
+from AppKit import (
+    NSApp,
+    NSBackingStoreBuffered,
+    NSColor,
+    NSFont,
+    NSMakeRect,
+    NSTextField,
+    NSView,
+    NSWindow,
+    NSWindowStyleMaskClosable,
+    NSWindowStyleMaskTitled,
+)
 from Quartz import (
     CGDisplayBounds,
     CGEventCreateMouseEvent,
@@ -275,54 +287,132 @@ def _run_server_thread() -> None:
 # ---------- macOS menu bar app ---------------------------------------------
 
 INTERVAL_OPTIONS = [0.5, 1, 2, 3, 5]
+APP_VERSION = "0.3.0"
+
+
+def _make_label(text: str, frame, size: float = 13,
+                bold: bool = False, color=None) -> NSTextField:
+    label = NSTextField.alloc().initWithFrame_(frame)
+    label.setStringValue_(text)
+    label.setBezeled_(False)
+    label.setDrawsBackground_(False)
+    label.setEditable_(False)
+    label.setSelectable_(False)
+    font = NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+    label.setFont_(font)
+    if color:
+        label.setTextColor_(color)
+    return label
+
+
+class InfoWindow:
+    """Native macOS window showing server status. Hides on close instead of quitting."""
+
+    def __init__(self, ip: str, port: int):
+        self.ip = ip
+        self.port = port
+        w, h = 380, 200
+        style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(200, 400, w, h), style, NSBackingStoreBuffered, False,
+        )
+        self.window.setTitle_("Boox Display Digitizer")
+        self.window.setReleasedWhenClosed_(False)
+        self.window.setLevel_(3)  # floating
+
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+
+        gray = NSColor.secondaryLabelColor()
+
+        content.addSubview_(_make_label(
+            "Boox Display Digitizer", NSMakeRect(24, 150, 340, 24), size=18, bold=True))
+        content.addSubview_(_make_label(
+            f"v{APP_VERSION}", NSMakeRect(24, 130, 340, 18), size=11, color=gray))
+        content.addSubview_(_make_label(
+            "Server", NSMakeRect(24, 98, 60, 18), size=12, bold=True))
+        content.addSubview_(_make_label(
+            f"ws://{ip}:{port}", NSMakeRect(90, 98, 260, 18), size=12))
+        content.addSubview_(_make_label(
+            "Status", NSMakeRect(24, 74, 60, 18), size=12, bold=True))
+        self._status_label = _make_label(
+            "Running", NSMakeRect(90, 74, 260, 18), size=12,
+            color=NSColor.systemGreenColor())
+        content.addSubview_(self._status_label)
+        content.addSubview_(_make_label(
+            "Close this window — the app continues in the menu bar  ✏️",
+            NSMakeRect(24, 28, 340, 32), size=11, color=gray))
+
+        self.window.setContentView_(content)
+
+    def show(self):
+        self.window.makeKeyAndOrderFront_(None)
+        self.window.center()
+        NSApp.activateIgnoringOtherApps_(True)
+
+    def hide(self):
+        self.window.orderOut_(None)
+
+    def update_clients(self, count: int):
+        status = f"Running — {count} client(s)" if count > 0 else "Running — waiting for connection"
+        self._status_label.setStringValue_(status)
+
 
 class BooxBridgeApp(rumps.App):
     def __init__(self):
         ip = _get_local_ip()
         super().__init__(
-            name="Boox Bridge",
-            title="\u270F\uFE0F",  # pencil emoji
+            name="Boox Display Digitizer",
+            title="\u270F\uFE0F",
             quit_button=None,
         )
 
-        self.status_item = rumps.MenuItem(f"ws://{ip}:{PORT}", callback=None)
-        self.status_item.set_callback(None)
-        self.clients_item = rumps.MenuItem("Clients: 0", callback=None)
-        self.clients_item.set_callback(None)
-
-        self.interval_menu = rumps.MenuItem("Screenshot Interval")
-        for val in INTERVAL_OPTIONS:
-            label = f"{val}s"
-            item = rumps.MenuItem(label, callback=self._set_interval)
-            item._interval_value = val
-            if val == screenshot_interval:
-                item.state = True
-            self.interval_menu.add(item)
+        self._info_window = InfoWindow(ip, PORT)
 
         self.menu = [
-            self.status_item,
-            self.clients_item,
-            None,  # separator
-            self.interval_menu,
+            rumps.MenuItem(f"ws://{ip}:{PORT}"),
+            rumps.MenuItem("Clients: 0"),
             None,
+            rumps.MenuItem("Screenshot Interval"),
+            None,
+            rumps.MenuItem("Show Window", callback=self._show_window),
             rumps.MenuItem("Quit", callback=self._quit),
         ]
 
-        # Start server in background thread.
+        # Make status items non-clickable.
+        self.menu[f"ws://{ip}:{PORT}"].set_callback(None)
+        self.menu["Clients: 0"].set_callback(None)
+
+        # Screenshot interval submenu.
+        interval_menu = self.menu["Screenshot Interval"]
+        for val in INTERVAL_OPTIONS:
+            item = rumps.MenuItem(f"{val}s", callback=self._set_interval)
+            item._interval_value = val
+            if val == screenshot_interval:
+                item.state = True
+            interval_menu.add(item)
+
+        # Start server.
         self._server_thread = threading.Thread(target=_run_server_thread, daemon=True)
         self._server_thread.start()
+
+        # Show startup window.
+        self._info_window.show()
 
         # Periodic UI update.
         self._timer = rumps.Timer(self._update_ui, 2)
         self._timer.start()
 
     def _update_ui(self, _sender) -> None:
-        self.clients_item.title = f"Clients: {connected_clients}"
+        self.menu["Clients: 0"].title = f"Clients: {connected_clients}"
+        self._info_window.update_clients(connected_clients)
+
+    def _show_window(self, _sender) -> None:
+        self._info_window.show()
 
     def _set_interval(self, sender) -> None:
         global screenshot_interval
         screenshot_interval = sender._interval_value
-        for item in self.interval_menu.values():
+        for item in self.menu["Screenshot Interval"].values():
             if hasattr(item, '_interval_value'):
                 item.state = (item._interval_value == screenshot_interval)
         log.info("screenshot interval changed to %ss", screenshot_interval)
