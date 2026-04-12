@@ -30,12 +30,7 @@ jobs:
             --noconfirm \
             --clean \
             --osx-bundle-identifier "com.boox.display-digitizer" \
-            --target-architecture universal2 \
             server.py
-
-      - name: Verify binary architecture
-        run: |
-          file "server/dist/Boox Display Digitizer.app/Contents/MacOS/Boox Display Digitizer"
 
       - name: Create DMG
         run: |
