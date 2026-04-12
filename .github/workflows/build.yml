@@ -7,6 +7,13 @@ on:
 
 jobs:
   build-server:
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            python-arch: arm64
+          - arch: x86_64
+            python-arch: x64
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +21,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          architecture: ${{ matrix.python-arch }}
+
+      - name: Verify architecture
+        run: |
+          python -c "import platform; print('Python arch:', platform.machine())"
+          file $(which python)
 
       - name: Install dependencies
         run: |
@@ -29,24 +42,27 @@ jobs:
         run: |
           codesign --deep --force --sign - "server/dist/Boox Display Digitizer.app"
 
+      - name: Verify binary architecture
+        run: |
+          file "server/dist/Boox Display Digitizer.app/Contents/MacOS/Boox Display Digitizer"
+
       - name: Create DMG
         run: |
           cd server
           mkdir -p dmg-stage
           cp -R "dist/Boox Display Digitizer.app" dmg-stage/
           ln -s /Applications dmg-stage/Applications
-          sync
-          sleep 1
+          sync && sleep 1
           hdiutil create \
             -volname "Boox Display Digitizer" \
             -srcfolder dmg-stage \
             -ov -format UDZO \
-            "dist/BooxDisplayDigitizer.dmg"
+            "dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: server-dmg
-          path: server/dist/BooxDisplayDigitizer.dmg
+          name: server-${{ matrix.arch }}
+          path: server/dist/BooxDisplayDigitizer-${{ matrix.arch }}.dmg
 
   build-android:
     runs-on: ubuntu-latest
@@ -92,6 +108,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/server-dmg/*.dmg
+            artifacts/server-arm64/*.dmg
+            artifacts/server-x86_64/*.dmg
             artifacts/android-apk/*.apk
           generate_release_notes: true
