@@ -7,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Boox Display Digitizer"
-BUNDLE_ID="com.boox.display-digitizer"
 ARCH="$(uname -m)"
 
 # Ensure venv
@@ -15,17 +14,16 @@ if [ ! -d .venv ]; then
     python3 -m venv .venv
 fi
 source .venv/bin/activate
-pip install -r requirements.txt pyinstaller
+pip install -r requirements.txt py2app
+
+# Clean previous build
+rm -rf build dist
 
 # Build .app bundle
-pyinstaller \
-    --name "$APP_NAME" \
-    --windowed \
-    --onedir \
-    --noconfirm \
-    --clean \
-    --osx-bundle-identifier "$BUNDLE_ID" \
-    server.py
+python setup.py py2app
+
+# Ad-hoc code sign
+codesign --deep --force --sign - "dist/$APP_NAME.app"
 
 # Create DMG with Applications symlink (drag-to-install)
 DMG_DIR="dmg-stage"
@@ -34,12 +32,14 @@ mkdir -p "$DMG_DIR"
 cp -R "dist/$APP_NAME.app" "$DMG_DIR/"
 ln -s /Applications "$DMG_DIR/Applications"
 
-DMG_NAME="BooxDisplayDigitizer-${ARCH}.dmg"
+DMG_NAME="BooxDisplayDigitizer.dmg"
 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$DMG_DIR" \
     -ov -format UDZO \
     "dist/$DMG_NAME"
+
+rm -rf "$DMG_DIR"
 
 echo ""
 echo "Built: dist/$DMG_NAME"

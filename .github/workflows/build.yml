@@ -18,19 +18,16 @@ jobs:
       - name: Install dependencies
         run: |
           cd server
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt py2app
 
-      - name: Build .app bundle
+      - name: Build .app bundle with py2app
         run: |
           cd server
-          pyinstaller \
-            --name "Boox Display Digitizer" \
-            --windowed \
-            --onedir \
-            --noconfirm \
-            --clean \
-            --osx-bundle-identifier "com.boox.display-digitizer" \
-            server.py
+          python setup.py py2app
+
+      - name: Code sign (ad-hoc)
+        run: |
+          codesign --deep --force --sign - "server/dist/Boox Display Digitizer.app"
 
       - name: Create DMG
         run: |

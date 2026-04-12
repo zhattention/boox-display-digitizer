@@ -16,10 +16,11 @@ android/app/*.iml
 *.apk
 *.aab
 
-# PyInstaller
+# PyInstaller / py2app
 server/build/
 server/dist/
 server/*.spec
+server/dmg-stage/
 
 # macOS
 .DS_Store
