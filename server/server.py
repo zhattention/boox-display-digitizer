@@ -38,8 +38,6 @@ from Quartz import (
     kCGMouseButtonLeft,
     kCGMouseButtonRight,
 )
-from zeroconf import ServiceInfo
-from zeroconf.asyncio import AsyncZeroconf
 
 # ---------- config ---------------------------------------------------------
 
@@ -62,7 +60,6 @@ DISCOVERY_PORT = 9998
 DISCOVERY_MAGIC = b"BOOX-BRIDGE"
 DISCOVERY_INTERVAL = 2
 
-SERVICE_TYPE = "_boox-bridge._tcp.local."
 
 # ---------- shared state ---------------------------------------------------
 
@@ -98,17 +95,6 @@ def _get_local_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
-
-def _make_service_info(port: int) -> ServiceInfo:
-    ip = _get_local_ip()
-    hostname = socket.gethostname()
-    return ServiceInfo(
-        SERVICE_TYPE,
-        f"Boox Bridge ({hostname}).{SERVICE_TYPE}",
-        addresses=[socket.inet_aton(ip)],
-        port=port,
-        properties={"version": "1"},
-    )
 
 # ---------- core logic -----------------------------------------------------
 
@@ -270,11 +256,6 @@ async def server_main() -> None:
     log.info("boox-bridge server starting on ws://%s:%d", HOST, PORT)
     log.info("screen: %dx%d points", SCREEN_W, SCREEN_H)
 
-    svc = _make_service_info(PORT)
-    azc = AsyncZeroconf()
-    await azc.async_register_service(svc)
-    log.info("mDNS registered @ %s:%d", _get_local_ip(), PORT)
-
     udp_task = asyncio.create_task(udp_broadcast(PORT))
 
     try:
@@ -283,8 +264,6 @@ async def server_main() -> None:
             await asyncio.Future()
     finally:
         udp_task.cancel()
-        await azc.async_unregister_service(svc)
-        await azc.async_close()
 
 
 def _run_server_thread() -> None:
