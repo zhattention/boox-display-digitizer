@@ -39,6 +39,8 @@ from Quartz import (
     CGEventCreateMouseEvent,
     CGEventPost,
     CGMainDisplayID,
+    CGPreflightScreenCaptureAccess,
+    CGRequestScreenCaptureAccess,
     kCGEventLeftMouseDown,
     kCGEventLeftMouseDragged,
     kCGEventLeftMouseUp,
@@ -164,10 +166,14 @@ class MouseInjector:
 
 
 def grab_screenshot_jpeg() -> bytes:
+    if not CGPreflightScreenCaptureAccess():
+        log.error("grab_screenshot called but screen capture is NOT permitted")
     with mss.mss() as sct:
         monitor = sct.monitors[1]
         shot = sct.grab(monitor)
     img = Image.frombytes("RGB", shot.size, shot.rgb)
+    if img.getbbox() is None:
+        log.warning("captured image is completely blank — permission likely denied")
     img = img.convert("L")
     img.thumbnail((SCREENSHOT_MAX_WIDTH, SCREENSHOT_MAX_HEIGHT), Image.LANCZOS)
     buf = io.BytesIO()
@@ -311,7 +317,7 @@ class InfoWindow:
     def __init__(self, ip: str, port: int):
         self.ip = ip
         self.port = port
-        w, h = 380, 200
+        w, h = 380, 230
         style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(200, 400, w, h), style, NSBackingStoreBuffered, False,
@@ -325,24 +331,37 @@ class InfoWindow:
         gray = NSColor.secondaryLabelColor()
 
         content.addSubview_(_make_label(
-            "Boox Display Digitizer", NSMakeRect(24, 150, 340, 24), size=18, bold=True))
+            "Boox Display Digitizer", NSMakeRect(24, 180, 340, 24), size=18, bold=True))
         content.addSubview_(_make_label(
-            f"v{APP_VERSION}", NSMakeRect(24, 130, 340, 18), size=11, color=gray))
+            f"v{APP_VERSION}", NSMakeRect(24, 160, 340, 18), size=11, color=gray))
         content.addSubview_(_make_label(
-            "Server", NSMakeRect(24, 98, 60, 18), size=12, bold=True))
+            "Server", NSMakeRect(24, 128, 80, 18), size=12, bold=True))
         content.addSubview_(_make_label(
-            f"ws://{ip}:{port}", NSMakeRect(90, 98, 260, 18), size=12))
+            f"ws://{ip}:{port}", NSMakeRect(110, 128, 240, 18), size=12))
         content.addSubview_(_make_label(
-            "Status", NSMakeRect(24, 74, 60, 18), size=12, bold=True))
+            "Status", NSMakeRect(24, 104, 80, 18), size=12, bold=True))
         self._status_label = _make_label(
-            "Running", NSMakeRect(90, 74, 260, 18), size=12,
+            "Running", NSMakeRect(110, 104, 240, 18), size=12,
             color=NSColor.systemGreenColor())
         content.addSubview_(self._status_label)
+
         content.addSubview_(_make_label(
-            "Close this window — the app continues in the menu bar  ✏️",
+            "Screen", NSMakeRect(24, 80, 80, 18), size=12, bold=True))
+        self._screen_label = _make_label(
+            "Checking...", NSMakeRect(110, 80, 240, 18), size=12, color=gray)
+        content.addSubview_(self._screen_label)
+
+        content.addSubview_(_make_label(
+            "Close this window — the app continues in the menu bar",
             NSMakeRect(24, 28, 340, 32), size=11, color=gray))
 
         self.window.setContentView_(content)
+
+        # Request screen capture permission on first launch.
+        log.info("requesting screen capture access...")
+        granted = CGRequestScreenCaptureAccess()
+        log.info("CGRequestScreenCaptureAccess() returned %s", granted)
+        self._update_screen_permission()
 
     def show(self):
         self.window.makeKeyAndOrderFront_(None)
@@ -352,9 +371,22 @@ class InfoWindow:
     def hide(self):
         self.window.orderOut_(None)
 
+    def _update_screen_permission(self):
+        has_access = CGPreflightScreenCaptureAccess()
+        log.debug("CGPreflightScreenCaptureAccess() = %s", has_access)
+        if has_access:
+            self._screen_label.setStringValue_("Recording Allowed")
+            self._screen_label.setTextColor_(NSColor.systemGreenColor())
+        else:
+            log.warning("screen capture NOT permitted — user must grant in "
+                        "System Settings > Privacy & Security > Screen Recording")
+            self._screen_label.setStringValue_("No Permission — grant in System Settings")
+            self._screen_label.setTextColor_(NSColor.systemRedColor())
+
     def update_clients(self, count: int):
         status = f"Running — {count} client(s)" if count > 0 else "Running — waiting for connection"
         self._status_label.setStringValue_(status)
+        self._update_screen_permission()
 
 
 class BooxBridgeApp(rumps.App):
@@ -371,6 +403,7 @@ class BooxBridgeApp(rumps.App):
         self.menu = [
             rumps.MenuItem(f"ws://{ip}:{PORT}"),
             rumps.MenuItem("Clients: 0"),
+            rumps.MenuItem("Screen: Checking..."),
             None,
             rumps.MenuItem("Screenshot Interval"),
             None,
@@ -381,6 +414,7 @@ class BooxBridgeApp(rumps.App):
         # Make status items non-clickable.
         self.menu[f"ws://{ip}:{PORT}"].set_callback(None)
         self.menu["Clients: 0"].set_callback(None)
+        self.menu["Screen: Checking..."].set_callback(None)
 
         # Screenshot interval submenu.
         interval_menu = self.menu["Screenshot Interval"]
@@ -404,6 +438,10 @@ class BooxBridgeApp(rumps.App):
 
     def _update_ui(self, _sender) -> None:
         self.menu["Clients: 0"].title = f"Clients: {connected_clients}"
+        has_access = CGPreflightScreenCaptureAccess()
+        self.menu["Screen: Checking..."].title = (
+            "Screen: Allowed" if has_access else "Screen: No Permission"
+        )
         self._info_window.update_clients(connected_clients)
 
     def _show_window(self, _sender) -> None:
