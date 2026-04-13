@@ -19,20 +19,24 @@ import sys
 import threading
 
 import mss
+import objc
 import rumps
 import websockets
 from PIL import Image
 from AppKit import (
     NSApp,
     NSBackingStoreBuffered,
+    NSBezelStyleAccessoryBarAction,
     NSColor,
     NSFont,
     NSMakeRect,
     NSTextField,
+    NSButton,
     NSView,
     NSWindow,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskTitled,
+    NSWorkspace,
 )
 from Quartz import (
     CGDisplayBounds,
@@ -348,8 +352,16 @@ class InfoWindow:
         content.addSubview_(_make_label(
             "Screen", NSMakeRect(24, 80, 80, 18), size=12, bold=True))
         self._screen_label = _make_label(
-            "Checking...", NSMakeRect(110, 80, 240, 18), size=12, color=gray)
+            "Checking...", NSMakeRect(110, 80, 160, 18), size=12, color=gray)
         content.addSubview_(self._screen_label)
+
+        self._settings_btn = NSButton.alloc().initWithFrame_(NSMakeRect(274, 77, 90, 22))
+        self._settings_btn.setTitle_("Open Settings")
+        self._settings_btn.setBezelStyle_(NSBezelStyleAccessoryBarAction)
+        self._settings_btn.setTarget_(self)
+        self._settings_btn.setAction_(objc.selector(self._open_screen_settings, signature=b"v@:@"))
+        self._settings_btn.setHidden_(True)
+        content.addSubview_(self._settings_btn)
 
         content.addSubview_(_make_label(
             "Close this window — the app continues in the menu bar",
@@ -357,10 +369,12 @@ class InfoWindow:
 
         self.window.setContentView_(content)
 
-        # Request screen capture permission on first launch.
-        log.info("requesting screen capture access...")
-        granted = CGRequestScreenCaptureAccess()
-        log.info("CGRequestScreenCaptureAccess() returned %s", granted)
+        # Check screen capture permission on launch.
+        has_access = CGPreflightScreenCaptureAccess()
+        log.info("screen capture permission on launch: %s", has_access)
+        if not has_access:
+            log.info("requesting screen capture access (opens System Settings on macOS 14+)...")
+            CGRequestScreenCaptureAccess()
         self._update_screen_permission()
 
     def show(self):
@@ -371,17 +385,25 @@ class InfoWindow:
     def hide(self):
         self.window.orderOut_(None)
 
+    def _open_screen_settings(self, _sender=None):
+        log.info("opening System Settings > Screen Recording...")
+        from Foundation import NSURL
+        url = NSURL.URLWithString_("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        NSWorkspace.sharedWorkspace().openURL_(url)
+
     def _update_screen_permission(self):
         has_access = CGPreflightScreenCaptureAccess()
         log.debug("CGPreflightScreenCaptureAccess() = %s", has_access)
         if has_access:
             self._screen_label.setStringValue_("Recording Allowed")
             self._screen_label.setTextColor_(NSColor.systemGreenColor())
+            self._settings_btn.setHidden_(True)
         else:
             log.warning("screen capture NOT permitted — user must grant in "
                         "System Settings > Privacy & Security > Screen Recording")
-            self._screen_label.setStringValue_("No Permission — grant in System Settings")
+            self._screen_label.setStringValue_("No Permission")
             self._screen_label.setTextColor_(NSColor.systemRedColor())
+            self._settings_btn.setHidden_(False)
 
     def update_clients(self, count: int):
         status = f"Running — {count} client(s)" if count > 0 else "Running — waiting for connection"
