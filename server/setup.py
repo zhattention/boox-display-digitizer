@@ -24,6 +24,7 @@ setup(
         "py2app": {
             "argv_emulation": False,
             "emulate_shell_environment": True,
+            "iconfile": "icon.icns",
             "frameworks": _find_libffi(),
             "packages": ["rumps", "mss", "websockets", "PIL", "Quartz", "objc"],
             "plist": {

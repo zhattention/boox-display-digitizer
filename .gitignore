@@ -21,6 +21,7 @@ server/build/
 server/dist/
 server/*.spec
 server/dmg-stage/
+server/icon.iconset/
 
 # macOS
 .DS_Store
